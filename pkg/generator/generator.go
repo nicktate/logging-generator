@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 )
 
@@ -23,6 +24,9 @@ const (
 // Generator represents a generator to run
 type Generator interface {
 	Run(context.Context) error
+
+	Collect(ch chan<- prometheus.Metric)
+	Describe(ch chan<- *prometheus.Desc)
 }
 
 // Generator represents a logging generator.
@@ -32,6 +36,8 @@ type generator struct {
 	messageSize   int64
 	messageTotal  int64
 	messagePeriod time.Duration
+
+	*metrics
 }
 
 type writer struct {
@@ -96,6 +102,18 @@ func NewGenerator(options ...Option) Generator {
 		DefaultMessageSize,
 		DefaultMessageTotal,
 		DefaultMessagePeriod,
+		&metrics{
+			logLinesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "logging_generator",
+				Name:      "lines_total",
+				Help:      "Total number of lines emitted.",
+			}, []string{}),
+			logBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "logging_generator",
+				Name:      "bytes_total",
+				Help:      "Total number of bytes emitted.",
+			}, []string{}),
+		},
 	}
 
 	for _, o := range options {
@@ -106,13 +124,13 @@ func NewGenerator(options ...Option) Generator {
 }
 
 // Run starts the logging generator.
-func (s *generator) Run(ctx context.Context) error {
+func (g *generator) Run(ctx context.Context) error {
 	var total int64
-	kill := time.NewTimer(s.killPeriod)
+	kill := time.NewTimer(g.killPeriod)
 	defer kill.Stop()
-	period := time.NewTicker(s.messagePeriod)
+	period := time.NewTicker(g.messagePeriod)
 	defer period.Stop()
-	for ctx.Err() == nil && total < s.messageTotal {
+	for ctx.Err() == nil && total < g.messageTotal {
 		select {
 		case <-kill.C:
 			return nil
@@ -120,11 +138,14 @@ func (s *generator) Run(ctx context.Context) error {
 			// continue
 		}
 
-		err := writePassages(s.messageSize, s.writer)
+		err := writePassages(g.messageSize, g.writer)
 		if err != nil {
 			return err
 		}
+
 		total++
+		g.metrics.logLinesTotal.With(prometheus.Labels{}).Inc()
+		g.metrics.logBytesTotal.With(prometheus.Labels{}).Add(float64(g.messageSize))
 	}
 
 	select {
